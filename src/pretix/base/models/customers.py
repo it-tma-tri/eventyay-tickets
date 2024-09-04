@@ -1,3 +1,6 @@
+import string
+import uuid
+
 from django.conf import settings
 from django.contrib.auth.hashers import (
     check_password, is_password_usable, make_password,
@@ -123,30 +126,41 @@ class Customer(LoggedModel):
         Raises:
             ValueError: If a unique identifier could not be generated after multiple attempts.
         """
-        charset = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
         iteration = 0
         length = settings.ENTROPY['customer_identifier']
 
-        while True:
-            code = get_random_string(length=length, allowed_chars=charset)
-            iteration += 1
+        char_list = string.ascii_uppercase + string.digits.replace('0', '').replace('1', '')
+        def base36_encode(number, length):
+            result = ""
+            while number:
+                number, remainder = divmod(number, 36)
+                result = char_list[remainder] + result
+            return result.zfill(length)
+        
+        def generate_random_identifier(length):
+            # Generate a UUID and convert to an integer
+            number = uuid.uuid4().int
+            
+            # Convert to a base-36 string (using digits and uppercase letters)
+            base36_id = base36_encode(number, length)
+            code = base36_id[:length]
+            if(banned(code)):
+                length += 1
+                if length > Customer.identifier.field.max_length:
+                    raise ValueError("Unable to generate a unique identifier.")
+                return generate_random_identifier(length)
+            return code
 
-            # Check if the code is banned
-            if banned(code):
-                continue
+        while iteration < 20:
+            code = generate_random_identifier(length=length)
+            iteration += 1
 
             # Check if the code is unique
             if not Customer.objects.filter(identifier=code).exists():
                 self.identifier = code
                 return
 
-            # Increase the length after 20 iterations
-            if iteration > 20:
-                length += 1
-                iteration = 0
-                # throw error if the length exceeds the maximum length
-                if length > Customer.identifier.field.max_length:
-                    raise ValueError("Unable to generate a unique identifier.")
+        raise ValueError("Unable to generate a unique identifier.")
 
     @property
     def name(self):
@@ -226,7 +240,7 @@ class Customer(LoggedModel):
         return is_password_usable(self.password)
 
     def get_session_auth_hash(self):
-        key_salt = "pretix.base.models.customers.Customer.get_session_auth_hash"
+        key_salt = "$2a$12$9yg2Pg.pJOnOzO9Ysxx7aO/xznE3yhBIl5h3i4i9pz1uRDSDwBska"
         payload = self.password
         payload += self.email
         return salted_hmac(key_salt, payload).hexdigest()

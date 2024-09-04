@@ -1,12 +1,12 @@
-from importlib import import_module
-from urllib.parse import quote, urlparse, parse_qs, urlunparse, urlencode
 import hashlib
+from importlib import import_module
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.signing import BadSignature, dumps, loads
-from django.db import transaction, IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, IntegerField, OuterRef, Q, Subquery
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, redirect, render
@@ -28,9 +28,10 @@ from pretix.base.services.mail import mail
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.multidomain.models import KnownDomain
 from pretix.multidomain.urlreverse import build_absolute_uri, eventreverse
-from pretix.presale.forms.customer import (
+from pretix.presale.forms.customer import TokenGenerator
+from pretix.presale.forms.customer_forms import (
     AuthenticationForm, ChangeInfoForm, ChangePasswordForm, RegistrationForm,
-    ResetPasswordForm, SetPasswordForm, TokenGenerator,
+    ResetPasswordForm, SetPasswordForm,
 )
 from pretix.presale.utils import (
     customer_login, customer_logout, update_customer_session_auth_hash,
@@ -63,268 +64,6 @@ class RedirectBackMixin:
             require_https=self.request.is_secure(),
         )
         return redirect_to if url_is_safe else ''
-
-
-class LoginView(RedirectBackMixin, FormView):
-    """
-    Display the login form and handle the login action.
-    """
-    form_class = AuthenticationForm
-    template_name = 'pretixpresale/organizers/customer_login.html'
-    redirect_authenticated_user = True
-
-    @method_decorator(sensitive_post_parameters())
-    @method_decorator(csrf_protect)
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        if not request.organizer.settings.customer_accounts:
-            raise Http404('Feature not enabled')
-        if self.redirect_authenticated_user and self.request.customer:
-            redirect_to = self.get_success_url()
-            if redirect_to == self.request.path:
-                raise ValueError(
-                    "Redirection loop for authenticated user detected. Check that "
-                    "your LOGIN_REDIRECT_URL doesn't point to a login page."
-                )
-            return HttpResponseRedirect(redirect_to)
-        return super().dispatch(request, *args, **kwargs)
-
-    def post(self, request, *args, **kwargs):
-        if not request.organizer.settings.customer_accounts_native:
-            raise Http404('Feature not enabled')
-        return super().post(request, *args, **kwargs)
-
-    def get_context_data(self, **kwargs):
-        return super().get_context_data(
-            **kwargs,
-            providers=self.request.organizer.sso_providers.all()
-        )
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['request'] = self.request
-        return kwargs
-
-    def get_success_url(self):
-        url = self.get_redirect_url()
-        return url or eventreverse(self.request.organizer, 'presale:organizer.customer.profile', kwargs={})
-
-    def form_valid(self, form):
-        """Security check complete. Log the user in."""
-        customer_login(self.request, form.get_customer())
-        return HttpResponseRedirect(self.get_success_url())
-
-
-class LogoutView(View):
-    """
-    A view that handles the logout process for a customer.
-
-    Attributes:
-        redirect_field_name (str): The name of the query parameter used for redirection after logout. Defaults to 'next'.
-    """
-
-    redirect_field_name = 'next'
-
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        """
-        Dispatches the request to the appropriate handler. This method logs out the customer and redirects them.
-
-        Args:
-            request (HttpRequest): The HTTP request object.
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-
-        Returns:
-            HttpResponseRedirect: Redirects to the next page after logout.
-        """
-        customer_logout(request)
-        next_page = self.get_next_page()
-        return HttpResponseRedirect(next_page)
-
-    def get_next_page(self):
-        """
-        Determines the next page to redirect to after logout.
-
-        This method checks for a redirect URL in the POST or GET parameters.
-        If a valid URL is found, it is used as the next page.
-        Otherwise, the user is redirected to the default page.
-
-        Returns:
-            str: The URL of the next page to redirect to.
-        """
-        next_page = eventreverse(self.request.organizer, 'presale:organizer.index', kwargs={})
-
-        if (self.redirect_field_name in self.request.POST or
-                self.redirect_field_name in self.request.GET):
-            next_page = self.request.POST.get(
-                self.redirect_field_name,
-                self.request.GET.get(self.redirect_field_name)
-            )
-            url_is_safe = url_has_allowed_host_and_scheme(
-                url=next_page,
-                allowed_hosts=None,
-                require_https=self.request.is_secure(),
-            )
-            if not url_is_safe:
-                next_page = self.request.path
-        return next_page
-
-
-class RegistrationView(RedirectBackMixin, FormView):
-    form_class = RegistrationForm
-    template_name = 'pretixpresale/organizers/customer_registration.html'
-    redirect_authenticated_user = True
-
-    @method_decorator(sensitive_post_parameters())
-    @method_decorator(csrf_protect)
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        """
-        Dispatches the request to the appropriate handler with additional checks and protections.
-
-        Args:
-            request (HttpRequest): The HTTP request object.
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-
-        Returns:
-            HttpResponseRedirect or HttpResponse: Redirects authenticated users to the success URL or
-            proceeds with the normal dispatch process for other requests.
-
-        Raises:
-            Http404: If customer accounts or native customer accounts features are not enabled.
-            ValueError: If a redirection loop is detected for authenticated users.
-        """
-        # Check if customer accounts are enabled
-        if not request.organizer.settings.customer_accounts:
-            raise Http404('Feature not enabled')
-
-        # Check if native customer accounts are enabled
-        if not request.organizer.settings.customer_accounts_native:
-            raise Http404('Feature not enabled')
-
-        # Redirect authenticated users to the success URL
-        if self.redirect_authenticated_user and self.request.customer:
-            redirect_to = self.get_success_url()
-
-            # Prevent redirection loop
-            if redirect_to == self.request.path:
-                raise ValueError(
-                    "Redirection loop for authenticated user detected. Check that "
-                    "your LOGIN_REDIRECT_URL doesn't point to a login page."
-                )
-            return HttpResponseRedirect(redirect_to)
-
-        # Proceed with the normal dispatch process
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['request'] = self.request
-        return kwargs
-
-    def get_success_url(self):
-        url = self.get_redirect_url()
-        return url or eventreverse(self.request.organizer, 'presale:organizer.customer.login', kwargs={})
-
-    def form_valid(self, form):
-        with transaction.atomic():
-            form.create()
-        messages.success(
-            self.request,
-            _('Your account has been created. Please follow the link in the email we sent you to activate your '
-              'account and choose a password.')
-        )
-        return HttpResponseRedirect(self.get_success_url())
-
-
-class SetPasswordView(FormView):
-    form_class = SetPasswordForm
-    template_name = 'pretixpresale/organizers/customer_setpassword.html'
-
-    @method_decorator(sensitive_post_parameters())
-    @method_decorator(csrf_protect)
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        if not request.organizer.settings.customer_accounts:
-            raise Http404('Feature not enabled')
-        if not request.organizer.settings.customer_accounts_native:
-            raise Http404('Feature not enabled')
-        try:
-            self.customer = request.organizer.customers.get(identifier=self.request.GET.get('id'), provider__isnull=True)
-        except Customer.DoesNotExist:
-            messages.error(request, _('You clicked an invalid link.'))
-            return HttpResponseRedirect(self.get_success_url())
-        if not TokenGenerator().check_token(self.customer, self.request.GET.get('token', '')):
-            messages.error(request, _('You clicked an invalid link.'))
-            return HttpResponseRedirect(self.get_success_url())
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['customer'] = self.customer
-        return kwargs
-
-    def get_success_url(self):
-        return eventreverse(self.request.organizer, 'presale:organizer.customer.login', kwargs={})
-
-    def form_valid(self, form):
-        with transaction.atomic():
-            self.customer.set_password(form.cleaned_data['password'])
-            self.customer.is_verified = True
-            self.customer.save()
-            self.customer.log_action('pretix.customer.password.set', {})
-        messages.success(
-            self.request,
-            _('Your new password has been set! You can now use it to log in.'),
-        )
-        return HttpResponseRedirect(self.get_success_url())
-
-
-class ResetPasswordView(FormView):
-    form_class = ResetPasswordForm
-    template_name = 'pretixpresale/organizers/customer_resetpw.html'
-
-    @method_decorator(sensitive_post_parameters())
-    @method_decorator(csrf_protect)
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        if not request.organizer.settings.customer_accounts:
-            raise Http404('Feature not enabled')
-        if not request.organizer.settings.customer_accounts_native:
-            raise Http404('Feature not enabled')
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_success_url(self):
-        return eventreverse(self.request.organizer, 'presale:organizer.customer.login', kwargs={})
-
-    def form_valid(self, form):
-        customer = form.customer
-        customer.log_action('pretix.customer.password.resetrequested', {})
-        ctx = customer.get_email_context()
-        token = TokenGenerator().make_token(customer)
-        ctx['url'] = build_absolute_uri(self.request.organizer,
-                                        'presale:organizer.customer.recoverpw') + '?id=' + customer.identifier + '&token=' + token
-        mail(
-            customer.email,
-            _('Set a new password for your account at {organizer}').format(organizer=self.request.organizer.name),
-            self.request.organizer.settings.mail_text_customer_reset,
-            ctx,
-            locale=customer.locale,
-            customer=customer,
-            organizer=self.request.organizer,
-        )
-        messages.success(
-            self.request,
-            _('We\'ve sent you an email with further instructions on resetting your password.')
-        )
-        return HttpResponseRedirect(self.get_success_url())
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['request'] = self.request
-        return kwargs
 
 
 class CustomerRequiredMixin:
@@ -376,39 +115,6 @@ class ProfileView(CustomerRequiredMixin, ListView):
                 continue
             o.count_positions = annotated.get(o.pk)['pcnt']
         return ctx
-
-
-class ChangePasswordView(CustomerRequiredMixin, FormView):
-    template_name = 'pretixpresale/organizers/customer_password.html'
-    form_class = ChangePasswordForm
-
-    @method_decorator(sensitive_post_parameters())
-    @method_decorator(csrf_protect)
-    @method_decorator(never_cache)
-    def dispatch(self, request, *args, **kwargs):
-        if not request.organizer.settings.customer_accounts:
-            raise Http404('Feature not enabled')
-        if self.request.customer.provider_id:
-            raise Http404('Feature not enabled')
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_success_url(self):
-        return eventreverse(self.request.organizer, 'presale:organizer.customer.profile', kwargs={})
-
-    @transaction.atomic()
-    def form_valid(self, form):
-        customer = form.customer
-        customer.log_action('pretix.customer.password.set', {})
-        customer.set_password(form.cleaned_data['password'])
-        customer.save()
-        messages.success(self.request, _('Your changes have been saved.'))
-        update_customer_session_auth_hash(self.request, customer)
-        return HttpResponseRedirect(self.get_success_url())
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['customer'] = self.request.customer
-        return kwargs
 
 
 class ChangeInformationView(CustomerRequiredMixin, FormView):

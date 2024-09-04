@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import string
+import uuid
 from collections import Counter
 from datetime import datetime, time, timedelta
 from decimal import Decimal
@@ -15,7 +16,7 @@ import pytz
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models import (
-    Case, Exists, F, Max, OuterRef, Q, Subquery, Sum, Value, When, JSONField,
+    Case, Exists, F, JSONField, Max, OuterRef, Q, Subquery, Sum, Value, When,
 )
 from django.db.models.functions import Coalesce, Greatest
 from django.db.models.signals import post_delete
@@ -38,7 +39,7 @@ from pretix.base.banlist import banned
 from pretix.base.decimal import round_decimal
 from pretix.base.email import get_email_context
 from pretix.base.i18n import language
-from pretix.base.models import User, Customer
+from pretix.base.models import Customer, User
 from pretix.base.reldate import RelativeDateWrapper
 from pretix.base.services.locking import NoLockManager
 from pretix.base.settings import PERSON_NAME_SCHEMES
@@ -53,11 +54,16 @@ logger = logging.getLogger(__name__)
 
 
 def generate_secret():
-    return get_random_string(length=16, allowed_chars=string.ascii_lowercase + string.digits)
-
-
-def generate_position_secret():
-    raise TypeError("Function no longer exists, use secret generators")
+    char_list = string.ascii_lowercase + string.digits
+    length = 16
+    result = ""
+    number = uuid.uuid4().int
+    while number:
+        number, remainder = divmod(number, 36)
+        result = char_list[remainder] + result
+    result = result.zfill(length)
+    code = result[:length]
+    return code
 
 
 class SecureOrderQuerySet(models.QuerySet):
@@ -302,7 +308,7 @@ class Order(LockModel, LoggedModel):
     @cached_property
     @scopes_disabled()
     def count_positions(self):
-        if hasattr(self, 'pcnt'):
+        if getattr(self, 'pcnt', None) is not None:
             return self.pcnt or 0
         return self.positions.count()
 
@@ -830,7 +836,7 @@ class Order(LockModel, LoggedModel):
 
         return self._is_still_available(count_waitinglist=count_waitinglist, force=force)
 
-    def _is_still_available(self, now_dt: datetime=None, count_waitinglist=True, force=False,
+    def _is_still_available(self, now_dt=None, count_waitinglist=True, force=False,
                             check_voucher_usage=False) -> Union[bool, str]:
         error_messages = {
             'unavailable': _('The ordered product "{item}" is no longer available.'),
@@ -1239,7 +1245,7 @@ class AbstractPosition(models.Model):
         # answers of other items in the same cart if the question objects have been
         # selected via prefetch_related
         if not all:
-            if hasattr(self.item, 'questions_to_ask'):
+            if getattr(self.item, 'questions_to_ask', None) is not None:
                 questions = list(copy.copy(q) for q in self.item.questions_to_ask)
             else:
                 questions = list(copy.copy(q) for q in self.item.questions.filter(ask_during_checkin=False,

@@ -30,7 +30,7 @@ from pretix.control.permissions import (
     AdministratorPermissionRequiredMixin, event_permission_required,
 )
 from pretix.control.views.event import DecoupleMixin
-from pretix.control.views.organizer import OrganizerDetailViewMixin
+from pretix.control.views.organizer_views import OrganizerDetailViewMixin
 from pretix.multidomain.urlreverse import eventreverse
 from pretix.plugins.stripe.forms import OrganizerStripeSettingsForm
 from pretix.plugins.stripe.models import ReferencedStripeObject
